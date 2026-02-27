@@ -63,27 +63,16 @@ void ModeAuto::_exit()
 void ModeAuto::update()
 {
     if (plane.mission.state() != AP_Mission::MISSION_RUNNING) {
-// --- START PRECISION ATTACK LOGIC ---
-    if (plane.mission.get_current_nav_index() == (plane.mission.num_commands() - 1)) {
-        // ۱. سوئیچ به مود Guided برای لغو هرگونه بازگشت خودکار
-        plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
-        
-        // ۲. قفل لرزش بال‌ها (Roll) روی صفر درجه برای پایداری مطلق
+// --- FINAL PRECISION LOCK ---
+    if (mission.get_current_nav_index() == (mission.num_commands() - 1)) {
+        set_mode(plane.mode_guided, ModeReason::MISSION_END);
         plane.guided_state.target_roll_cd = 0;
-        
-        // ۳. قفل زاویه حمله روی ۸۵- درجه (شیرجه مستقیم)
         plane.guided_state.target_pitch_cd = -8500;
-        
-        // ۴. گاز حداکثری برای حفظ سرعت و دقت مسیر
         plane.guided_state.target_throttle_pct = 100;
-        
-        // ۵. غیرفعال کردن سنسور واماندگی برای اطاعت محض از زاویه
         plane.aparm.stall_prevention.set(0);
-        
-        gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: LETHAL PRECISION LOCKED");
+        gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: LOCKED");
         return;
     }
-    // --- END PRECISION ATTACK LOGIC ---
         // this could happen if AP_Landing::restart_landing_sequence() returns false which would only happen if:
         // restart_landing_sequence() is called when not executing a NAV_LAND or there is no previous nav point
         plane.set_mode(plane.mode_rtl, ModeReason::MISSION_END);
