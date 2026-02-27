@@ -63,30 +63,27 @@ void ModeAuto::_exit()
 void ModeAuto::update()
 {
     if (plane.mission.state() != AP_Mission::MISSION_RUNNING) {
-        // --- ULTRA-PRECISION TERMINAL ATTACK LOGIC ---
+// --- START PRECISION ATTACK LOGIC ---
     if (plane.mission.get_current_nav_index() == (plane.mission.num_commands() - 1)) {
-        
-        // ۱. سوئیچ اجباری به لایه هدایت مستقیم برای حذف هرگونه انحراف ناوبری
+        // ۱. سوئیچ به مود Guided برای لغو هرگونه بازگشت خودکار
         plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
         
-        // ۲. قفل کردن وضعیت بدنه (Roll) روی صفر برای ثبات مطلق بال‌ها در برابر باد
+        // ۲. قفل لرزش بال‌ها (Roll) روی صفر درجه برای پایداری مطلق
         plane.guided_state.target_roll_cd = 0;
         
-        // ۳. قفل کردن زاویه حمله (Pitch) روی ۸۵- درجه (شیرجه مستقیم)
+        // ۳. قفل زاویه حمله روی ۸۵- درجه (شیرجه مستقیم)
         plane.guided_state.target_pitch_cd = -8500;
         
-        // ۴. اصرار بر توان موتور ۱۰۰ درصد برای حفظ پایداری آیرودینامیکی
+        // ۴. گاز حداکثری برای حفظ سرعت و دقت مسیر
         plane.guided_state.target_throttle_pct = 100;
         
-        // ۵. سرکوب تمام لایه‌های ایمنی برای اطاعت محض از دستور شما
+        // ۵. غیرفعال کردن سنسور واماندگی برای اطاعت محض از زاویه
         plane.aparm.stall_prevention.set(0);
         
-        // ۶. اعلان وضعیت قفل نهایی به میشن‌پلنر
         gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: LETHAL PRECISION LOCKED");
-        
-        return; // توقف کامل کدهای استاندارد در نقطه نهایی
+        return;
     }
-    // ----------------------------------------------
+    // --- END PRECISION ATTACK LOGIC ---
         // this could happen if AP_Landing::restart_landing_sequence() returns false which would only happen if:
         // restart_landing_sequence() is called when not executing a NAV_LAND or there is no previous nav point
         plane.set_mode(plane.mode_rtl, ModeReason::MISSION_END);
