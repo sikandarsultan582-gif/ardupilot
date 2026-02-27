@@ -1,227 +1,189 @@
 #include "mode.h"
 #include "Plane.h"
 
-bool ModeAcro::_enter()
+bool ModeAuto::_enter()
 {
-    acro_state.locked_roll = false;
-    acro_state.locked_pitch = false;
-    IGNORE_RETURN(ahrs.get_quaternion(acro_state.q));
+#if HAL_QUADPLANE_ENABLED
+    if (plane.previous_mode == &plane.mode_guided &&
+        quadplane.guided_wait_takeoff_on_mode_enter) {
+        if (!plane.mission.starts_with_takeoff_cmd()) {
+            gcs().send_text(MAV_SEVERITY_ERROR,"Takeoff waypoint required");
+            quadplane.guided_wait_takeoff = true;
+            return false;
+        }
+    }
+    
+    if (plane.quadplane.available() && plane.quadplane.enable == 2) {
+        plane.auto_state.vtol_mode = true;
+    } else {
+        plane.auto_state.vtol_mode = false;
+    }
+#else
+    plane.auto_state.vtol_mode = false;
+#endif
+    plane.next_WP_loc = plane.prev_WP_loc = plane.current_loc;
+    plane.mission.start_or_resume();
+
+    if (hal.util->was_watchdog_armed()) {
+        if (hal.util->persistent_data.waypoint_num != 0) {
+            gcs().send_text(MAV_SEVERITY_INFO, "Watchdog: resume WP %u", hal.util->persistent_data.waypoint_num);
+            plane.mission.set_current_cmd(hal.util->persistent_data.waypoint_num);
+            hal.util->persistent_data.waypoint_num = 0;
+        }
+    }
+
+#if HAL_SOARING_ENABLED
+    plane.g2.soaring_controller.init_cruising();
+#endif
+
     return true;
 }
 
-void ModeAcro::update()
+void ModeAuto::_exit()
 {
-    // handle locked/unlocked control
-    if (acro_state.locked_roll) {
-        plane.nav_roll_cd = acro_state.locked_roll_err;
-    } else {
-        plane.nav_roll_cd = ahrs.roll_sensor;
+    if (plane.mission.state() == AP_Mission::MISSION_RUNNING) {
+        plane.mission.stop();
+        bool restart = plane.mission.get_current_nav_cmd().id == MAV_CMD_NAV_LAND;
+#if HAL_QUADPLANE_ENABLED
+        if (plane.quadplane.is_vtol_land(plane.mission.get_current_nav_cmd().id)) {
+            restart = false;
+        }
+#endif
+        if (restart) {
+            plane.landing.restart_landing_sequence();
+        }
     }
-    if (acro_state.locked_pitch) {
-        plane.nav_pitch_cd = acro_state.locked_pitch_cd;
-    } else {
-        plane.nav_pitch_cd = ahrs.pitch_sensor;
-    }
+    plane.auto_state.started_flying_in_auto_ms = 0;
 }
 
-void ModeAcro::run()
+void ModeAuto::update()
 {
-    output_pilot_throttle();
-
-    if (plane.g.acro_locking == 2 && plane.g.acro_yaw_rate > 0 &&
-        plane.yawController.rate_control_enabled()) {
-        // we can do 3D acro locking
-        stabilize_quaternion();
+    if (plane.mission.state() != AP_Mission::MISSION_RUNNING) {
+        // --- V15 PRECISION ATTACK (PLANE ONLY) ---
+        // این بخش فقط در حالت Fixed-wing و اتمام مأموریت اجرا می‌شود
+        if (plane.control_mode == &plane.mode_auto && !plane.auto_state.vtol_mode) {
+            plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
+            plane.nav_roll_cd = 0;
+            plane.nav_pitch_cd = -8500; // زاویه شیرجه
+            SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 100);
+            plane.aparm.stall_prevention.set(0);
+            gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: PLANE LOCK ENGAGED");
+            return;
+        }
+        
+        plane.set_mode(plane.mode_rtl, ModeReason::MISSION_END);
         return;
     }
 
-    // Normal acro
-    stabilize();
-}
+    uint16_t nav_cmd_id = plane.mission.get_current_nav_cmd().id;
 
-/*
-  this is the ACRO mode stabilization function. It does rate
-  stabilization on roll and pitch axes
- */
-void ModeAcro::stabilize()
-{
-    const float speed_scaler = plane.get_speed_scaler();
-    const float rexpo = plane.roll_in_expo(true);
-    const float pexpo = plane.pitch_in_expo(true);
-    float roll_rate = (rexpo/SERVO_MAX) * plane.g.acro_roll_rate;
-    float pitch_rate = (pexpo/SERVO_MAX) * plane.g.acro_pitch_rate;
+#if HAL_QUADPLANE_ENABLED
+    if (plane.quadplane.in_vtol_auto()) {
+        plane.quadplane.control_auto();
+        return;
+    }
+#endif
 
-    IGNORE_RETURN(ahrs.get_quaternion(acro_state.q));
+#if AP_PLANE_GLIDER_PULLUP_ENABLED
+    if (pullup.in_pullup()) {
+        return;
+    }
+#endif
 
-    /*
-      check for special roll handling near the pitch poles
-     */
-    if (plane.g.acro_locking && is_zero(roll_rate)) {
-        /*
-          we have no roll stick input, so we will enter "roll locked"
-          mode, and hold the roll we had when the stick was released
-         */
-        if (!acro_state.locked_roll) {
-            acro_state.locked_roll = true;
-            acro_state.locked_roll_err = 0;
+    if (nav_cmd_id == MAV_CMD_NAV_TAKEOFF ||
+        (nav_cmd_id == MAV_CMD_NAV_LAND && plane.flight_stage == AP_FixedWing::FlightStage::ABORT_LANDING)) {
+        plane.takeoff_calc_roll();
+        plane.takeoff_calc_pitch();
+        plane.takeoff_calc_throttle();
+    } else if (nav_cmd_id == MAV_CMD_NAV_LAND) {
+        plane.calc_nav_roll();
+        plane.calc_nav_pitch();
+        plane.nav_roll_cd = plane.landing.constrain_roll(plane.nav_roll_cd, plane.g.level_roll_limit*100UL);
+        if (plane.landing.is_throttle_suppressed()) {
+            SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 0.0);
         } else {
-            acro_state.locked_roll_err += ahrs.get_gyro().x * plane.G_Dt;
+            plane.calc_throttle();
         }
-        int32_t roll_error_cd = -degrees(acro_state.locked_roll_err)*100;
-        plane.nav_roll_cd = ahrs.roll_sensor + roll_error_cd;
-        // try to reduce the integrated angular error to zero. We set
-        // 'stabilize' to true, which disables the roll integrator
-        SRV_Channels::set_output_scaled(SRV_Channel::k_aileron, plane.rollController.get_servo_out(roll_error_cd,
-                                                                                             speed_scaler,
-                                                                                             true, false));
+#if AP_SCRIPTING_ENABLED
+    } else if (nav_cmd_id == MAV_CMD_NAV_SCRIPT_TIME) {
+        plane.nav_roll_cd = ahrs.roll_sensor;
+        plane.nav_pitch_cd = ahrs.pitch_sensor;
+#endif
     } else {
-        /*
-          aileron stick is non-zero, use pure rate control until the
-          user releases the stick
-         */
-        acro_state.locked_roll = false;
-        SRV_Channels::set_output_scaled(SRV_Channel::k_aileron, plane.rollController.get_rate_out(roll_rate,  speed_scaler));
-    }
-
-    if (plane.g.acro_locking && is_zero(pitch_rate)) {
-        /*
-          user has zero pitch stick input, so we lock pitch at the
-          point they release the stick
-         */
-        if (!acro_state.locked_pitch) {
-            acro_state.locked_pitch = true;
-            acro_state.locked_pitch_cd = ahrs.pitch_sensor;
+        if (nav_cmd_id != MAV_CMD_NAV_CONTINUE_AND_CHANGE_ALT) {
+            plane.steer_state.hold_course_cd = -1;
         }
-        // try to hold the locked pitch. Note that we have the pitch
-        // integrator enabled, which helps with inverted flight
-        plane.nav_pitch_cd = acro_state.locked_pitch_cd;
-        SRV_Channels::set_output_scaled(SRV_Channel::k_elevator, plane.pitchController.get_servo_out(plane.nav_pitch_cd - ahrs.pitch_sensor,
-                                                                                               speed_scaler,
-                                                                                               false, false));
-    } else {
-        /*
-          user has non-zero pitch input, use a pure rate controller
-         */
-        acro_state.locked_pitch = false;
-        SRV_Channels::set_output_scaled(SRV_Channel::k_elevator, plane.pitchController.get_rate_out(pitch_rate, speed_scaler));
+        plane.calc_nav_roll();
+        plane.calc_nav_pitch();
+        plane.calc_throttle();
     }
-
-    float rudder_output;
-    if (plane.g.acro_yaw_rate > 0 && plane.yawController.rate_control_enabled()) {
-        // user has asked for yaw rate control with yaw rate scaled by ACRO_YAW_RATE
-        const float rudd_expo = plane.rudder_in_expo(true);
-        const float yaw_rate = (rudd_expo/SERVO_MAX) * plane.g.acro_yaw_rate;
-        rudder_output = plane.yawController.get_rate_out(yaw_rate,  speed_scaler, false);
-    } else if (plane.flight_option_enabled(FlightOptions::ACRO_YAW_DAMPER)) {
-        // use yaw controller
-        rudder_output = plane.calc_nav_yaw_coordinated();
-    } else {
-        /*
-          manual rudder
-        */
-        rudder_output = plane.rudder_input();
-    }
-
-    output_rudder_and_steering(rudder_output);
-
 }
 
-/*
-  quaternion based acro stabilization with continuous locking. Enabled with ACRO_LOCKING=2
- */
-void ModeAcro::stabilize_quaternion()
+void ModeAuto::navigate()
 {
-    const float speed_scaler = plane.get_speed_scaler();
-    auto &q = acro_state.q;
-    const float rexpo = plane.roll_in_expo(true);
-    const float pexpo = plane.pitch_in_expo(true);
-    const float yexpo = plane.rudder_in_expo(true);
-
-    // get pilot desired rates
-    float roll_rate = (rexpo/SERVO_MAX) * plane.g.acro_roll_rate;
-    float pitch_rate = (pexpo/SERVO_MAX) * plane.g.acro_pitch_rate;
-    float yaw_rate = (yexpo/SERVO_MAX) * plane.g.acro_yaw_rate;
-    bool roll_active = !is_zero(roll_rate);
-    bool pitch_active = !is_zero(pitch_rate);
-    bool yaw_active = !is_zero(yaw_rate);
-
-    // integrate target attitude
-    Vector3f r{ float(radians(roll_rate)), float(radians(pitch_rate)), float(radians(yaw_rate)) };
-    r *= plane.G_Dt;
-    q.rotate_fast(r);
-    q.normalize();
-
-    // fill in target roll/pitch for GCS/logs
-    plane.nav_roll_cd = degrees(q.get_euler_roll())*100;
-    plane.nav_pitch_cd = degrees(q.get_euler_pitch())*100;
-
-    // get AHRS attitude
-    Quaternion ahrs_q;
-    IGNORE_RETURN(ahrs.get_quaternion(ahrs_q));
-
-    // zero target if not flying, no stick input and zero throttle
-    if (is_zero(plane.get_throttle_input()) &&
-        !plane.is_flying() &&
-        is_zero(roll_rate) &&
-        is_zero(pitch_rate) &&
-        is_zero(yaw_rate)) {
-        // cope with sitting on the ground with neutral sticks, no throttle
-        q = ahrs_q;
+    if (AP::ahrs().home_is_set()) {
+        plane.mission.update();
     }
-
-    // get error in attitude
-    Quaternion error_quat = ahrs_q.inverse() * q;
-    Vector3f error_angle1;
-    error_quat.to_axis_angle(error_angle1);
-
-    // don't let too much error build up, limit to 0.2s
-    const float max_error_t = 0.2;
-    float max_err_roll_rad  = radians(plane.g.acro_roll_rate*max_error_t);
-    float max_err_pitch_rad = radians(plane.g.acro_pitch_rate*max_error_t);
-    float max_err_yaw_rad   = radians(plane.g.acro_yaw_rate*max_error_t);
-
-    if (!roll_active && acro_state.roll_active_last) {
-        max_err_roll_rad = 0;
-    }
-    if (!pitch_active && acro_state.pitch_active_last) {
-        max_err_pitch_rad = 0;
-    }
-    if (!yaw_active && acro_state.yaw_active_last) {
-        max_err_yaw_rad = 0;
-    }
-
-    Vector3f desired_rates = error_angle1;
-    desired_rates.x = constrain_float(desired_rates.x, -max_err_roll_rad, max_err_roll_rad);
-    desired_rates.y = constrain_float(desired_rates.y, -max_err_pitch_rad, max_err_pitch_rad);
-    desired_rates.z = constrain_float(desired_rates.z, -max_err_yaw_rad, max_err_yaw_rad);
-
-    // correct target based on max error
-    q.rotate_fast(desired_rates - error_angle1);
-    q.normalize();
-
-    // convert to desired body rates
-    desired_rates.x /= plane.rollController.tau();
-    desired_rates.y /= plane.pitchController.tau();
-    desired_rates.z /= plane.pitchController.tau(); // no yaw tau parameter, use pitch
-
-    desired_rates *= degrees(1.0);
-
-    if (roll_active) {
-        desired_rates.x = roll_rate;
-    }
-    if (pitch_active) {
-        desired_rates.y = pitch_rate;
-    }
-    if (yaw_active) {
-        desired_rates.z = yaw_rate;
-    }
-
-    // call to rate controllers
-    SRV_Channels::set_output_scaled(SRV_Channel::k_aileron,  plane.rollController.get_rate_out(desired_rates.x, speed_scaler));
-    SRV_Channels::set_output_scaled(SRV_Channel::k_elevator, plane.pitchController.get_rate_out(desired_rates.y, speed_scaler));
-    output_rudder_and_steering(plane.yawController.get_rate_out(desired_rates.z,  speed_scaler, false));
-
-    acro_state.roll_active_last = roll_active;
-    acro_state.pitch_active_last = pitch_active;
-    acro_state.yaw_active_last = yaw_active;
 }
+
+bool ModeAuto::does_auto_navigation() const
+{
+#if AP_SCRIPTING_ENABLED
+   return (!plane.nav_scripting_active());
+#endif
+   return true;
+}
+
+bool ModeAuto::does_auto_throttle() const
+{
+#if AP_SCRIPTING_ENABLED
+   return (!plane.nav_scripting_active());
+#endif
+   return true;
+}
+
+bool ModeAuto::_pre_arm_checks(size_t buflen, char *buffer) const
+{
+#if HAL_QUADPLANE_ENABLED
+    if (plane.quadplane.enabled()) {
+        if (plane.quadplane.option_is_set(QuadPlane::Option::ONLY_ARM_IN_QMODE_OR_AUTO) &&
+                !plane.quadplane.is_vtol_takeoff(plane.mission.get_current_nav_cmd().id)) {
+            hal.util->snprintf(buffer, buflen, "not in VTOL takeoff");
+            return false;
+        }
+        if (!plane.mission.starts_with_takeoff_cmd()) {
+            hal.util->snprintf(buffer, buflen, "missing takeoff waypoint");
+            return false;
+        }
+    }
+#endif
+    return true;
+}
+
+bool ModeAuto::is_landing() const
+{
+    return (plane.flight_stage == AP_FixedWing::FlightStage::LAND);
+}
+
+void ModeAuto::run()
+{
+#if AP_PLANE_GLIDER_PULLUP_ENABLED
+    if (pullup.in_pullup()) {
+        pullup.stabilize_pullup();
+        return;
+    }
+#endif
+    if (plane.mission.get_current_nav_cmd().id == MAV_CMD_NAV_ALTITUDE_WAIT) {
+        wiggle_servos();
+        SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 0.0);
+        SRV_Channels::set_output_scaled(SRV_Channel::k_throttleLeft, 0.0);
+        SRV_Channels::set_output_scaled(SRV_Channel::k_throttleRight, 0.0);
+        SRV_Channels::set_output_to_trim(SRV_Channel::k_throttle);
+        SRV_Channels::set_output_to_trim(SRV_Channel::k_throttleLeft);
+        SRV_Channels::set_output_to_trim(SRV_Channel::k_throttleRight);
+        reset_controllers();
+    } else {
+        Mode::run();
+    }
+}
+  
