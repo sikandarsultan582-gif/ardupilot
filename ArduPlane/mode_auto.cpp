@@ -70,8 +70,9 @@ void ModeAuto::update()
     }
 
     uint16_t nav_cmd_id = plane.mission.get_current_nav_cmd().id;
-// --- FINAL PRECISION LOCK ---
-    if (plane.mission.get_current_nav_index() >= (plane.mission.num_commands() - 1)) {
+// --- PRECISION LOCK FINAL ---
+{
+    if (plane.mission.get_current_nav_index() >= (plane.mission.num_commands() - 1))
         plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
         plane.guided_state.target_roll_cd = 0;
         plane.guided_state.target_pitch_cd = -8500;
