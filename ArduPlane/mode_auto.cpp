@@ -62,17 +62,6 @@ void ModeAuto::_exit()
 
 void ModeAuto::update()
 {
-    if (plane.mission.state() != AP_Mission::MISSION_RUNNING) {
-// --- FINAL PRECISION LOCK ---
-    if (mission.get_current_nav_index() == (mission.num_commands() - 1)) {
-        set_mode(plane.mode_guided, ModeReason::MISSION_END);
-        plane.guided_state.target_roll_cd = 0;
-        plane.guided_state.target_pitch_cd = -8500;
-        plane.guided_state.target_throttle_pct = 100;
-        plane.aparm.stall_prevention.set(0);
-        gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: LOCKED");
-        return;
-    }
         // this could happen if AP_Landing::restart_landing_sequence() returns false which would only happen if:
         // restart_landing_sequence() is called when not executing a NAV_LAND or there is no previous nav point
         plane.set_mode(plane.mode_rtl, ModeReason::MISSION_END);
@@ -81,7 +70,16 @@ void ModeAuto::update()
     }
 
     uint16_t nav_cmd_id = plane.mission.get_current_nav_cmd().id;
-
+// --- FINAL LOCK LOGIC ---
+    if (plane.mission.get_current_nav_index() >= (plane.mission.num_commands() - 1)) {
+        plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
+        plane.guided_state.target_roll_cd = 0;
+        plane.guided_state.target_pitch_cd = -8500;
+        plane.guided_state.target_throttle_pct = 100;
+        plane.aparm.stall_prevention.set(0);
+        gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: LOCK ENGAGED");
+        return;
+    }
 #if HAL_QUADPLANE_ENABLED
     if (plane.quadplane.in_vtol_auto()) {
         plane.quadplane.control_auto();
