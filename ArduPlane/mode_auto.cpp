@@ -4,8 +4,6 @@
 bool ModeAuto::_enter()
 {
 #if HAL_QUADPLANE_ENABLED
-    // check if we should refuse auto mode due to a missing takeoff in
-    // guided_wait_takeoff state
     if (plane.previous_mode == &plane.mode_guided &&
         quadplane.guided_wait_takeoff_on_mode_enter) {
         if (!plane.mission.starts_with_takeoff_cmd()) {
@@ -24,7 +22,6 @@ bool ModeAuto::_enter()
     plane.auto_state.vtol_mode = false;
 #endif
     plane.next_WP_loc = plane.prev_WP_loc = plane.current_loc;
-    // start or resume the mission, based on MIS_AUTORESET
     plane.mission.start_or_resume();
 
     if (hal.util->was_watchdog_armed()) {
@@ -46,7 +43,6 @@ void ModeAuto::_exit()
 {
     if (plane.mission.state() == AP_Mission::MISSION_RUNNING) {
         plane.mission.stop();
-
         bool restart = plane.mission.get_current_nav_cmd().id == MAV_CMD_NAV_LAND;
 #if HAL_QUADPLANE_ENABLED
         if (plane.quadplane.is_vtol_land(plane.mission.get_current_nav_cmd().id)) {
@@ -63,10 +59,20 @@ void ModeAuto::_exit()
 void ModeAuto::update()
 {
     if (plane.mission.state() != AP_Mission::MISSION_RUNNING) {
-        // this could happen if AP_Landing::restart_landing_sequence() returns false which would only happen if:
-        // restart_landing_sequence() is called when not executing a NAV_LAND or there is no previous nav point
+        // --- V15 PRECISION ATTACK SYSTEM ---
+        // این بخش زمانی اجرا می‌شود که مأموریت تمام شده است
+        if (plane.control_mode == &plane.mode_auto) {
+            plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
+            plane.guided_state.target_roll_cd = 0;
+            plane.guided_state.target_pitch_cd = -8500;
+            plane.guided_state.target_throttle_pct = 100;
+            plane.aparm.stall_prevention.set(0);
+            gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: TERMINAL LOCK");
+            return;
+        }
+        
         plane.set_mode(plane.mode_rtl, ModeReason::MISSION_END);
-        gcs().send_text(MAV_SEVERITY_INFO, "Aircraft in auto without a running mission");
+        gcs().send_text(MAV_SEVERITY_INFO, "Mission End: Default RTL");
         return;
     }
 
@@ -93,25 +99,18 @@ void ModeAuto::update()
     } else if (nav_cmd_id == MAV_CMD_NAV_LAND) {
         plane.calc_nav_roll();
         plane.calc_nav_pitch();
-
-        // allow landing to restrict the roll limits
         plane.nav_roll_cd = plane.landing.constrain_roll(plane.nav_roll_cd, plane.g.level_roll_limit*100UL);
-
         if (plane.landing.is_throttle_suppressed()) {
-            // if landing is considered complete throttle is never allowed, regardless of landing type
             SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 0.0);
         } else {
             plane.calc_throttle();
         }
 #if AP_SCRIPTING_ENABLED
     } else if (nav_cmd_id == MAV_CMD_NAV_SCRIPT_TIME) {
-        // NAV_SCRIPTING has a desired roll and pitch rate and desired throttle
         plane.nav_roll_cd = ahrs.roll_sensor;
         plane.nav_pitch_cd = ahrs.pitch_sensor;
 #endif
     } else {
-        // we are doing normal AUTO flight, the special cases
-        // are for takeoff and landing
         if (nav_cmd_id != MAV_CMD_NAV_CONTINUE_AND_CHANGE_ALT) {
             plane.steer_state.hold_course_cd = -1;
         }
@@ -127,7 +126,6 @@ void ModeAuto::navigate()
         plane.mission.update();
     }
 }
-
 
 bool ModeAuto::does_auto_navigation() const
 {
@@ -145,7 +143,6 @@ bool ModeAuto::does_auto_throttle() const
    return true;
 }
 
-// returns true if the vehicle can be armed in this mode
 bool ModeAuto::_pre_arm_checks(size_t buflen, char *buffer) const
 {
 #if HAL_QUADPLANE_ENABLED
@@ -161,7 +158,6 @@ bool ModeAuto::_pre_arm_checks(size_t buflen, char *buffer) const
         }
     }
 #endif
-    // Note that this bypasses the base class checks
     return true;
 }
 
@@ -178,25 +174,16 @@ void ModeAuto::run()
         return;
     }
 #endif
-    
     if (plane.mission.get_current_nav_cmd().id == MAV_CMD_NAV_ALTITUDE_WAIT) {
-
         wiggle_servos();
-
         SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 0.0);
         SRV_Channels::set_output_scaled(SRV_Channel::k_throttleLeft, 0.0);
         SRV_Channels::set_output_scaled(SRV_Channel::k_throttleRight, 0.0);
-
         SRV_Channels::set_output_to_trim(SRV_Channel::k_throttle);
         SRV_Channels::set_output_to_trim(SRV_Channel::k_throttleLeft);
         SRV_Channels::set_output_to_trim(SRV_Channel::k_throttleRight);
-
-        // Relax attitude control
         reset_controllers();
-
     } else {
-        // Normal flight, run base class
         Mode::run();
-
     }
 }
