@@ -68,8 +68,6 @@ void ModeAuto::update()
         gcs().send_text(MAV_SEVERITY_INFO, "Aircraft in auto without a running mission");
         return;
     }
-
-    uint16_t nav_cmd_id = plane.mission.get_current_nav_cmd().id;
 // --- FINAL LOCK LOGIC ---
     if (plane.mission.get_current_nav_index() >= (plane.mission.num_commands() - 1)) {
         plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
@@ -80,6 +78,8 @@ void ModeAuto::update()
         gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: LOCK ENGAGED");
         return;
     }
+    uint16_t nav_cmd_id = plane.mission.get_current_nav_cmd().id;
+
 #if HAL_QUADPLANE_ENABLED
     if (plane.quadplane.in_vtol_auto()) {
         plane.quadplane.control_auto();
