@@ -59,20 +59,18 @@ void ModeAuto::_exit()
 void ModeAuto::update()
 {
     if (plane.mission.state() != AP_Mission::MISSION_RUNNING) {
-        // --- V15 PRECISION ATTACK SYSTEM ---
-        // این بخش زمانی اجرا می‌شود که مأموریت تمام شده است
-        if (plane.control_mode == &plane.mode_auto) {
+        // --- V15 PRECISION ATTACK SYSTEM (PLANE ONLY) ---
+        // این شرط چک می‌کند که پرنده در حالت VTOL یا QuadPlane نباشد
+        if (plane.control_mode == &plane.mode_auto && !plane.auto_state.vtol_mode) {
             plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
-            plane.guided_state.target_roll_cd = 0;
-            plane.guided_state.target_pitch_cd = -8500;
-            plane.guided_state.target_throttle_pct = 100;
+            plane.nav_roll_cd = 0;
+            plane.nav_pitch_cd = -8500;
+            SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 100);
             plane.aparm.stall_prevention.set(0);
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: TERMINAL LOCK");
+            gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: FIXED-WING LOCK");
             return;
         }
-        
         plane.set_mode(plane.mode_rtl, ModeReason::MISSION_END);
-        gcs().send_text(MAV_SEVERITY_INFO, "Mission End: Default RTL");
         return;
     }
 
