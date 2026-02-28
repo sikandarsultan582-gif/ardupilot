@@ -13,6 +13,7 @@ float get_terminal_pitch(const Location &loc1, const Location &loc2) {
     if (angle > 0) return -8500.0f; 
     return angle;
 }
+
 bool ModeAuto::_enter()
 {
 #if HAL_QUADPLANE_ENABLED
