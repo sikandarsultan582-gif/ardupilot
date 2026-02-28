@@ -58,18 +58,28 @@ void ModeAuto::_exit()
 
 void ModeAuto::update()
 {
+    // --- بخش اصلاح شده برای مأموریت انتحاری ---
     if (plane.mission.state() != AP_Mission::MISSION_RUNNING) {
-        // --- V15 PRECISION ATTACK SYSTEM (PLANE ONLY) ---
-        // این شرط چک می‌کند که پرنده در حالت VTOL یا QuadPlane نباشد
-        if (plane.control_mode == &plane.mode_auto && !plane.auto_state.vtol_mode) {
+        // اگر پهپاد در مود AUTO است اما مأموریت تمام شده:
+        if (plane.control_mode == &plane.mode_auto) {
+            // ۱. تغییر مود به Guided برای پذیرش دستورات مستقیم
             plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
+            
+            // ۲. تنظیم زاویه حمله (شیرجه شدید)
+            // ۸۵- درجه شیرجه برای برخورد مستقیم
+            plane.nav_pitch_cd = -8500; 
             plane.nav_roll_cd = 0;
-            plane.nav_pitch_cd = -8500;
+            
+            // ۳. حداکثر توان موتور (۱۰۰٪)
             SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 100);
+            
+            // ۴. غیرفعال کردن سیستم جلوگیری از استال برای نترسیدن از سرعت بالا
             plane.aparm.stall_prevention.set(0);
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "V15: FIXED-WING LOCK");
+            
+            gcs().send_text(MAV_SEVERITY_CRITICAL, "V21: TERMINAL ATTACK ENGAGED");
             return;
         }
+        
         plane.set_mode(plane.mode_rtl, ModeReason::MISSION_END);
         return;
     }
