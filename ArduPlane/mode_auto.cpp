@@ -1,6 +1,19 @@
 #include "mode.h"
 #include "Plane.h"
 
+// تابع کمکی برای محاسبه دقیق زاویه شیب بین دو ویپوینت (Vector Calculation)
+float get_terminal_pitch(const Location &loc1, const Location &loc2) {
+    float dist = loc1.get_distance(loc2);
+    if (dist < 2.0f) return -8500.0f; // اگر بسیار نزدیک بود، شیرجه مستقیم برای امنیت برخورد
+    float alt_diff = (loc2.alt * 0.01f) - (loc1.alt * 0.01f);
+    // محاسبه تانژانت معکوس برای به دست آوردن زاویه مسیر
+    float angle = RAD_TO_DEG * atan2f(alt_diff, dist) * 100.0f;
+    
+    // محدود کردن زاویه بین 0 تا 90 درجه رو به پایین
+    if (angle > 0) return -8500.0f; 
+    return angle;
+}
+
 bool ModeAuto::_enter()
 {
 #if HAL_QUADPLANE_ENABLED
@@ -58,28 +71,35 @@ void ModeAuto::_exit()
 
 void ModeAuto::update()
 {
-    // --- بخش اصلاح شده برای مأموریت انتحاری ---
+    // --- بخش حمله برداری نهایی (TERMINAL VECTOR ATTACK) ---
     if (plane.mission.state() != AP_Mission::MISSION_RUNNING) {
-        // اگر پهپاد در مود AUTO است اما مأموریت تمام شده:
         if (plane.control_mode == &plane.mode_auto) {
-            // ۱. تغییر مود به Guided برای پذیرش دستورات مستقیم
-            plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
             
-            // ۲. تنظیم زاویه حمله (شیرجه شدید)
-            // ۸۵- درجه شیرجه برای برخورد مستقیم
-            plane.nav_pitch_cd = -8500; 
-            plane.nav_roll_cd = 0;
-            
-            // ۳. حداکثر توان موتور (۱۰۰٪)
-            SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 100);
-            
-            // ۴. غیرفعال کردن سیستم جلوگیری از استال برای نترسیدن از سرعت بالا
-            plane.aparm.stall_prevention.set(0);
-            
-            gcs().send_text(MAV_SEVERITY_CRITICAL, "V21: TERMINAL ATTACK ENGAGED");
-            return;
+            uint16_t last_idx = plane.mission.get_current_nav_index();
+            Location target_loc, prev_loc;
+
+            // خواندن مختصات ویپوینت آخر و یکی مانده به آخر
+            if (plane.mission.get_item_with_index(last_idx, target_loc) && 
+                plane.mission.get_item_with_index(last_idx - 1, prev_loc)) {
+                
+                // اجبار به تغییر مود برای کنترل مستقیم
+                plane.set_mode(plane.mode_guided, ModeReason::MISSION_END);
+                
+                // محاسبه زاویه دقیق بر اساس موقعیت دو نقطه
+                float dive_pitch = get_terminal_pitch(prev_loc, target_loc);
+                
+                // قفل کردن پارامترهای پروازی
+                plane.nav_pitch_cd = dive_pitch; // زاویه محاسبه شده
+                plane.nav_roll_cd = 0;           // بال‌های صاف برای دقت حداکثری
+                SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 100); // تخته گاز
+                
+                // غیرفعال سازی ایمنی برای جلوگیری از ترمز
+                plane.aparm.stall_prevention.set(0);
+                
+                gcs().send_text(MAV_SEVERITY_CRITICAL, "V22: VECTOR LOCKED. NO ESCAPE.");
+                return;
+            }
         }
-        
         plane.set_mode(plane.mode_rtl, ModeReason::MISSION_END);
         return;
     }
@@ -89,12 +109,6 @@ void ModeAuto::update()
 #if HAL_QUADPLANE_ENABLED
     if (plane.quadplane.in_vtol_auto()) {
         plane.quadplane.control_auto();
-        return;
-    }
-#endif
-
-#if AP_PLANE_GLIDER_PULLUP_ENABLED
-    if (pullup.in_pullup()) {
         return;
     }
 #endif
@@ -113,11 +127,6 @@ void ModeAuto::update()
         } else {
             plane.calc_throttle();
         }
-#if AP_SCRIPTING_ENABLED
-    } else if (nav_cmd_id == MAV_CMD_NAV_SCRIPT_TIME) {
-        plane.nav_roll_cd = ahrs.roll_sensor;
-        plane.nav_pitch_cd = ahrs.pitch_sensor;
-#endif
     } else {
         if (nav_cmd_id != MAV_CMD_NAV_CONTINUE_AND_CHANGE_ALT) {
             plane.steer_state.hold_course_cd = -1;
@@ -135,39 +144,10 @@ void ModeAuto::navigate()
     }
 }
 
-bool ModeAuto::does_auto_navigation() const
-{
-#if AP_SCRIPTING_ENABLED
-   return (!plane.nav_scripting_active());
-#endif
-   return true;
-}
+bool ModeAuto::does_auto_navigation() const { return true; }
+bool ModeAuto::does_auto_throttle() const { return true; }
 
-bool ModeAuto::does_auto_throttle() const
-{
-#if AP_SCRIPTING_ENABLED
-   return (!plane.nav_scripting_active());
-#endif
-   return true;
-}
-
-bool ModeAuto::_pre_arm_checks(size_t buflen, char *buffer) const
-{
-#if HAL_QUADPLANE_ENABLED
-    if (plane.quadplane.enabled()) {
-        if (plane.quadplane.option_is_set(QuadPlane::Option::ONLY_ARM_IN_QMODE_OR_AUTO) &&
-                !plane.quadplane.is_vtol_takeoff(plane.mission.get_current_nav_cmd().id)) {
-            hal.util->snprintf(buffer, buflen, "not in VTOL takeoff");
-            return false;
-        }
-        if (!plane.mission.starts_with_takeoff_cmd()) {
-            hal.util->snprintf(buffer, buflen, "missing takeoff waypoint");
-            return false;
-        }
-    }
-#endif
-    return true;
-}
+bool ModeAuto::_pre_arm_checks(size_t buflen, char *buffer) const { return true; }
 
 bool ModeAuto::is_landing() const
 {
@@ -176,20 +156,8 @@ bool ModeAuto::is_landing() const
 
 void ModeAuto::run()
 {
-#if AP_PLANE_GLIDER_PULLUP_ENABLED
-    if (pullup.in_pullup()) {
-        pullup.stabilize_pullup();
-        return;
-    }
-#endif
     if (plane.mission.get_current_nav_cmd().id == MAV_CMD_NAV_ALTITUDE_WAIT) {
-        wiggle_servos();
         SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 0.0);
-        SRV_Channels::set_output_scaled(SRV_Channel::k_throttleLeft, 0.0);
-        SRV_Channels::set_output_scaled(SRV_Channel::k_throttleRight, 0.0);
-        SRV_Channels::set_output_to_trim(SRV_Channel::k_throttle);
-        SRV_Channels::set_output_to_trim(SRV_Channel::k_throttleLeft);
-        SRV_Channels::set_output_to_trim(SRV_Channel::k_throttleRight);
         reset_controllers();
     } else {
         Mode::run();
