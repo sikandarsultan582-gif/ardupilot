@@ -1,47 +1,45 @@
 void ModeAuto::update()
 {
-    // 1. چک کردن وضعیت میشن (Mission)
+    // ۱. بررسی وضعیت کلی میشن
     if (plane.mission.state() != AP_Mission::MISSION_RUNNING) {
         plane.set_mode(plane.mode_rtl, ModeReason::MISSION_END);
         return;
     }
 
-    // --- شروع بخش اختصاصی: حمله برداری نهایی (TERMINAL VECTOR ATTACK) ---
-    uint16_t last_idx = plane.mission.num_commands() - 1;
-    uint16_t curr_idx = plane.mission.get_current_nav_index();
+    // --- بخش حمله برداری (Vector Attack) سازگار با تمام بردها ---
+    const uint16_t last_index = plane.mission.num_commands() - 1;
+    const uint16_t current_index = plane.mission.get_current_nav_index();
 
-    // اگر در ویپوینت آخر هستیم، محاسبات حمله را جایگزین ناوبری عادی کن
-    if (curr_idx == last_idx && last_idx > 0) {
+    // فقط وقتی در ویپوینت آخر هستیم عمل کن
+    if (current_index == last_index && last_index > 0) {
         Location target_loc, prev_loc;
-        if (plane.mission.get_item_with_index(last_idx, target_loc) && 
-            plane.mission.get_item_with_index(last_idx - 1, prev_loc)) {
+        if (plane.mission.get_item_with_index(last_index, target_loc) && 
+            plane.mission.get_item_with_index(last_index - 1, prev_loc)) {
             
-            // محاسبه زاویه بین دو نقطه (Pitch Calculation)
-            float dist = prev_loc.get_distance(target_loc);
-            float alt_diff = (target_loc.alt - prev_loc.alt) * 0.01f;
-            float target_pitch_deg = RAD_TO_DEG * atan2f(alt_diff, dist);
+            // محاسبه فاصله و اختلاف ارتفاع با متدهای استاندارد ArduPilot
+            const float distance = prev_loc.get_distance(target_loc);
+            const float alt_diff_m = (target_loc.alt - prev_loc.alt) * 0.01f;
+            
+            // محاسبه زاویه شیب
+            const float target_pitch_deg = RAD_TO_DEG * atan2f(alt_diff_m, MAX(distance, 1.0f));
 
-            // اعمال فرامین مستقیم به کنترلر ناوبری
-            plane.nav_roll_cd = 0;                          // بال‌ها کاملاً صاف (Stability)
-            plane.nav_pitch_cd = target_pitch_deg * 100.0f; // زاویه محاسبه شده
-            SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 100); // قدرت حداکثر
+            // مقداردهی به کنترلرهای ناوبری (بدون تغییر مود)
+            plane.nav_roll_cd = 0;                          // حفظ تعادل بال‌ها (Roll Stability)
+            plane.nav_pitch_cd = target_pitch_deg * 100.0f; // اعمال زاویه حمله نهایی
             
-            // غیرفعال سازی سیستم جلوگیری از استال برای عبور از محدودیت‌ها
+            // تنظیم تراتل به صورت مستقیم و ایمن
+            SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 100);
+            
+            // غیرفعال کردن موقت سیستم استال برای جلوگیری از ترمز هواپیما
             plane.aparm.stall_prevention.set(0);
 
-            // اطلاع‌رسانی به ایستگاه زمینی
-            static uint32_t last_msg_ms = 0;
-            if (AP_HAL::millis() - last_msg_ms > 2000) {
-                gcs().send_text(MAV_SEVERITY_CRITICAL, "V22: VECTOR LOCKED. DIVE ANGLE: %.1f", target_pitch_deg);
-                last_msg_ms = AP_HAL::millis();
-            }
-            return; // خروج از تابع تا کدهای پایین‌تر زاویه ما را تغییر ندهند
+            return; // توقف اجرای منطق عادی ناوبری برای ویپوینت آخر
         }
     }
-    // --- پایان بخش اختصاصی ---
+    // --- پایان بخش حمله ---
 
-    // روال عادی ArduPilot برای سایر ویپوینت‌ها
-    uint16_t nav_cmd_id = plane.mission.get_current_nav_cmd().id;
+    // روال پیش‌فرض ArduPilot برای سایر وضعیت‌ها
+    const uint16_t nav_cmd_id = plane.mission.get_current_nav_cmd().id;
 
 #if HAL_QUADPLANE_ENABLED
     if (plane.quadplane.in_vtol_auto()) {
