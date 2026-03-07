@@ -1,207 +1,62 @@
-name: test chibios
+void ModeAuto::update()
+{
+    // ۱. بررسی وضعیت کلی میشن
+    if (plane.mission.state() != AP_Mission::MISSION_RUNNING) {
+        plane.set_mode(plane.mode_rtl, ModeReason::MISSION_END);
+        return;
+    }
 
-on:
-  push:
-    paths-ignore:
-      # remove non chibios HAL
-      - 'libraries/AP_HAL_Linux/**'
-      - 'libraries/AP_HAL_ESP32/**'
-      - 'libraries/AP_HAL_SITL/**'
-      # remove non stm directories
-      - 'Tools/CHDK-Script/**'
-      - 'Tools/CodeStyle/**'
-      - 'Tools/completion/**'
-      - 'Tools/debug/**'
-      - 'Tools/environment_install/**'
-      - 'Tools/FilterTestTool/**'
-      - 'Tools/Frame_params/**'
-      - 'Tools/geotag/**'
-      - 'Tools/GIT_Test/**'
-      - 'Tools/gittools/**'
-      - 'Tools/Hello/**'
-      - 'Tools/mavproxy_modules/**'
-      - 'Tools/Pozyx/**'
-      - 'Tools/PrintVersion.py'
-      - 'Tools/Replay/**'
-      - 'Tools/simulink/**'
-      - 'Tools/UDP_Proxy/**'
-      - 'Tools/vagrant/**'
-      - 'Tools/Vicon/**'
-      # Remove vehicles autotest we need support of test_build_option.py in the Tools/autotest directory
-      - 'Tools/autotest/antennatracker.py'
-      - 'Tools/autotest/arduplane.py'
-      - 'Tools/autotest/ardusub.py'
-      - 'Tools/autotest/balancebot.py'
-      - 'Tools/autotest/location.txt'
-      - 'Tools/autotest/quadplane.py'
-      - 'Tools/autotest/rover.py'
-      - 'Tools/autotest/sailboat.py'
-      - 'Tools/autotest/swarminit.txt'
-      # Remove markdown files as irrelevant
-      - '**.md'
-      # Remove dotfile at root directory
-      - './.dir-locals.el'
-      - './.dockerignore'
-      - './.editorconfig'
-      - './.flake8'
-      - './.gitattributes'
-      - './.github'
-      - './.gitignore'
-      - './.pre-commit-config.yaml'
-      - './.pydevproject'
-      - './.valgrind-suppressions'
-      - './.valgrindrc'
-      - 'Dockerfile'
-      - 'Vagrantfile'
-      - 'Makefile'
-      # Remove some directories check
-      - '.vscode/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      # Remove change on other workflows
-      - '.github/workflows/test_environment.yml'
+    // --- بخش حمله برداری نهایی (Vector Attack) ---
+    const uint16_t last_idx = plane.mission.num_commands() - 1;
+    const uint16_t curr_idx = plane.mission.get_current_nav_index();
 
-  pull_request:
-    paths-ignore:
-      # remove non chibios HAL
-      - 'libraries/AP_HAL_Linux/**'
-      - 'libraries/AP_HAL_ESP32/**'
-      - 'libraries/AP_HAL_SITL/**'
-      # remove non stm directories
-      - 'Tools/CHDK-Script/**'
-      - 'Tools/CodeStyle/**'
-      - 'Tools/completion/**'
-      - 'Tools/debug/**'
-      - 'Tools/environment_install/**'
-      - 'Tools/FilterTestTool/**'
-      - 'Tools/Frame_params/**'
-      - 'Tools/geotag/**'
-      - 'Tools/GIT_Test/**'
-      - 'Tools/gittools/**'
-      - 'Tools/Hello/**'
-      - 'Tools/LogAnalyzer/**'
-      - 'Tools/mavproxy_modules/**'
-      - 'Tools/Pozyx/**'
-      - 'Tools/PrintVersion.py'
-      - 'Tools/Replay/**'
-      - 'Tools/simulink/**'
-      - 'Tools/UDP_Proxy/**'
-      - 'Tools/vagrant/**'
-      - 'Tools/Vicon/**'
-      # Remove vehicles autotest we need support of test_build_option.py in the Tools/autotest directory
-      - 'Tools/autotest/antennatracker.py'
-      - 'Tools/autotest/arduplane.py'
-      - 'Tools/autotest/ardusub.py'
-      - 'Tools/autotest/autotest.py'
-      - 'Tools/autotest/balancebot.py'
-      - 'Tools/autotest/common.py'
-      - 'Tools/autotest/examples.py'
-      - 'Tools/autotest/quadplane.py'
-      - 'Tools/autotest/rover.py'
-      - 'Tools/autotest/sailboat.py'
-      - 'Tools/autotest/**.txt'
-      - 'Tools/autotest/logger_metadata/**'
-      - 'Tools/autotest/param_metadata/**'
-      # Remove markdown files as irrelevant
-      - '**.md'
-      # Remove dotfile at root directory
-      - './.dir-locals.el'
-      - './.dockerignore'
-      - './.editorconfig'
-      - './.flake8'
-      - './.gitattributes'
-      - './.github'
-      - './.gitignore'
-      - './.pre-commit-config.yaml'
-      - './.pydevproject'
-      - './.valgrind-suppressions'
-      - './.valgrindrc'
-      - 'Dockerfile'
-      - 'Vagrantfile'
-      - 'Makefile'
-      # Remove some directories check
-      - '.vscode/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      # Remove change on other workflows
-      - '.github/workflows/test_environment.yml'
+    if (curr_idx == last_idx && last_idx > 0) {
+        Location target_loc, prev_loc;
+        // اصلاح ساختار شرطی برای خواندن ویپوینت‌ها
+        if (plane.mission.get_item_with_index(last_idx, target_loc) && 
+            plane.mission.get_item_with_index(last_idx - 1, prev_loc)) {
+            
+            float dist = prev_loc.get_distance(target_loc);
+            float alt_diff = (target_loc.alt - prev_loc.alt) * 0.01f;
+            float target_pitch = RAD_TO_DEG * atan2f(alt_diff, (dist > 1.0f ? dist : 1.0f));
 
-  workflow_dispatch:
+            plane.nav_roll_cd = 0; // پایداری کامل بال‌ها
+            plane.nav_pitch_cd = target_pitch * 100.0f; 
+            SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 100);
+            
+            plane.auto_state.takeoff_complete = true;
+            return; 
+        }
+    }
 
-concurrency:
-  group: ci-${{github.workflow}}-${{ github.ref }}
-  cancel-in-progress: true
+    // بخش استاندارد (جایگزین شرط HAL_QUADPLANE برای حذف خطا)
+    if (plane.quadplane.available() && plane.quadplane.in_vtol_auto()) {
+        plane.quadplane.control_auto();
+        return;
+    }
 
-jobs:
-  build:
-    runs-on: ubuntu-22.04
-    container: ardupilot/ardupilot-dev-${{ matrix.toolchain }}:v0.1.3
-    strategy:
-      fail-fast: false  # don't cancel if a job from the matrix fails
-      matrix:
-        config: [
-            stm32f7,
-            stm32h7,
-            fmuv2-plane,
-            periph-build,
-            iofirmware,
-            CubeOrange-bootloader,
-            fmuv3-bootloader,
-            revo-bootloader,
-            stm32h7-debug,
-            fmuv3,
-            revo-mini,
-            MatekF405-Wing,
-            CubeOrange-ODID,
-            CubeRedPrimary-bootloader,
-            configure-all,
-            build-options-defaults-test,
-            signing,
-            CubeOrange-PPP,
-            CubeOrange-EKF2,
-            SOHW,
-            Pixhawk6X-PPPGW,
-            new-check,
-        ]
-        toolchain: [
-            chibios,
-            #chibios-clang,
-        ]
-        gcc: [10]
-        exclude:
-          - gcc: 10
-            toolchain: chibios-clang
+    uint16_t nav_cmd_id = plane.mission.get_current_nav_cmd().id;
 
-    steps:
-      # git checkout the PR
-      - uses: actions/checkout@v6
-        with:
-          submodules: 'recursive'
-      # Put ccache into github cache for faster build
-      - name: Prepare ccache timestamp
-        id: ccache_cache_timestamp
-        run: |
-          NOW=$(date -u +"%F-%T")
-          echo "timestamp=${NOW}" >> $GITHUB_OUTPUT
-      - name: ccache cache files
-        uses: actions/cache@v5
-        with:
-          path: ~/.ccache
-          key: ${{github.workflow}}-ccache-${{matrix.config}}-${{ matrix.toolchain }}-${{ matrix.gcc }}-${{steps.ccache_cache_timestamp.outputs.timestamp}}
-          restore-keys: ${{github.workflow}}-ccache-${{matrix.config}}-${{ matrix.toolchain }}-${{ matrix.gcc }}  # restore ccache from either previous build on this branch or on master
-      - name: setup ccache
-        run: |
-          . .github/workflows/ccache.env
-      - name: test ${{matrix.config}} ${{ matrix.toolchain }} gcc-${{matrix.gcc}}
-        env:
-          CI_BUILD_TARGET: ${{matrix.config}}
-        shell: bash
-        run: |
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          if [[ ${{ matrix.toolchain }} == "chibios-clang" ]]; then
-            export CC=clang
-            export CXX=clang++
-          fi
-          PATH="/usr/lib/ccache:/opt/gcc-arm-none-eabi-${{matrix.gcc}}/bin:$PATH"
-          PATH="/github/home/.local/bin:$PATH"
-          Tools/scripts/build_ci.sh
-          ccache -s
-          ccache -z
+    if (nav_cmd_id == MAV_CMD_NAV_TAKEOFF ||
+        (nav_cmd_id == MAV_CMD_NAV_LAND && plane.flight_stage == AP_FixedWing::FlightStage::ABORT_LANDING)) {
+        plane.takeoff_calc_roll();
+        plane.takeoff_calc_pitch();
+        plane.takeoff_calc_throttle();
+    } else if (nav_cmd_id == MAV_CMD_NAV_LAND) {
+        plane.calc_nav_roll();
+        plane.calc_nav_pitch();
+        plane.nav_roll_cd = plane.landing.constrain_roll(plane.nav_roll_cd, plane.g.level_roll_limit*100UL);
+        if (plane.landing.is_throttle_suppressed()) {
+            SRV_Channels::set_output_scaled(SRV_Channel::k_throttle, 0.0);
+        } else {
+            plane.calc_throttle();
+        }
+    } else {
+        if (nav_cmd_id != MAV_CMD_NAV_CONTINUE_AND_CHANGE_ALT) {
+            plane.steer_state.hold_course_cd = -1;
+        }
+        plane.calc_nav_roll();
+        plane.calc_nav_pitch();
+        plane.calc_throttle();
+    }
+}
